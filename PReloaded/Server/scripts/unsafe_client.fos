@@ -26,6 +26,9 @@
 
 #define GETACCESS_FILE    "config\\GetAccess.cfg"
 
+// --- MINIMAL FIX (distance guard for container/body interactions) ---
+#define LOOT_MAX_DIST 1
+// -------------------------------------------------------------------
 import uint8  access_level(string& access) from "main";
 import string access_level(uint8& access) from "main";
 import bool   player_getaccess(Critter& player, int access, string& password) from "main";
@@ -469,14 +472,28 @@ void unsafe_TakeAll(Critter& target, int contId, int bodyId, int useFilter, stri
         if(target.Mode[MODE_HIDE] != 0 && target.GetAccess() < ACCESS_TESTER)
             target.ModeBase[MODE_HIDE] = 0;
 
-        Item@ cont;
-        Critter@ body;
+        Item@ cont = null;
+        Critter@ body = null;
 
         if(contId > 0)
         {
-            @cont = target.GetMap().GetItem(contId);
-            if(!valid(cont))
+            Map@ map = target.GetMap();
+            if(!valid(map)) {
+                target.RunClientScript("client_container_addons@_EnableItemsMove", 0, 0, 0, "", null);
+                return;
+            }
+
+            @cont = map.GetItem(contId);
+            if(!valid(cont)) {
+                target.RunClientScript("client_container_addons@_EnableItemsMove", 0, 0, 0, "", null);
+                return;
+            }
+
+            // --- MINIMUM GUARD: the container must be unlocked and within reach ---
+            if( (cont.Proto.Container_Changeble && !FLAG(cont.LockerCondition, LOCKER_ISOPEN)) ||
+                GetDistantion(target.HexX, target.HexY, cont.HexX, cont.HexY) > LOOT_MAX_DIST )
             {
+                target.ShowScreen(SHOW_SCREEN_CLOSE, 0, "");
                 target.RunClientScript("client_container_addons@_EnableItemsMove", 0, 0, 0, "", null);
                 return;
             }
@@ -484,7 +501,13 @@ void unsafe_TakeAll(Critter& target, int contId, int bodyId, int useFilter, stri
         else if(bodyId > 0)
         {
             @body = GetCritter(bodyId);
-            if(!valid(body))
+            if(!valid(body)) {
+                target.RunClientScript("client_container_addons@_EnableItemsMove", 0, 0, 0, "", null);
+                return;
+            }
+            // body must be on the same map and within range.
+            if(!valid(target.GetMap()) || target.GetMap().Id != body.GetMap().Id ||
+               GetCrittersDistantion(target, body) > LOOT_MAX_DIST)
             {
                 target.RunClientScript("client_container_addons@_EnableItemsMove", 0, 0, 0, "", null);
                 return;
@@ -558,7 +581,16 @@ void unsafe_TakeAll(Critter& target, int contId, int bodyId, int useFilter, stri
                 itemsWeight += int(items[i].Proto.Weight) * items[i].GetCount();
         }
 
-        if(items.length() > 0 && !(valid(cont) && cont.Proto.Container_Changeble && !FLAG(cont.LockerCondition, LOCKER_ISOPEN)))
+        // (optional secondary fuse – if the status changes in the meantime)
+        if(valid(cont) && ( (cont.Proto.Container_Changeble && !FLAG(cont.LockerCondition, LOCKER_ISOPEN)) ||
+                            GetDistantion(target.HexX, target.HexY, cont.HexX, cont.HexY) > LOOT_MAX_DIST ))
+        {
+            target.ShowScreen(SHOW_SCREEN_CLOSE, 0, "");
+            target.RunClientScript("client_container_addons@_EnableItemsMove", 0, 0, 0, "", null);
+            return;
+        }
+
+        if(items.length() > 0)
         {
             if(freeWeight >= itemsWeight)
                 MoveItems(items, target);
@@ -572,9 +604,15 @@ void unsafe_TakeAll(Critter& target, int contId, int bodyId, int useFilter, stri
                 _CritAnimatePickup(target);
         }
 
-
+        // Reopen only when it's legit (in-range & unlocked)
         if(valid(cont))
-            target.ShowContainer(null, cont, TRANSFER_FAR_CONT);
+        {
+            if(!(cont.Proto.Container_Changeble && !FLAG(cont.LockerCondition, LOCKER_ISOPEN)) &&
+               GetDistantion(target.HexX, target.HexY, cont.HexX, cont.HexY) <= LOOT_MAX_DIST)
+                target.ShowContainer(null, cont, TRANSFER_FAR_CONT);
+            else
+                target.ShowScreen(SHOW_SCREEN_CLOSE, 0, "");
+        }
         else if(valid(body))
             target.ShowContainer(body, null, TRANSFER_CRIT_LOOT);
     }
@@ -1698,9 +1736,16 @@ void unsafe_ScienceAtHex(Critter& player, int mode, int, int, string@, array<int
             return;
         }
 
+        if (player.Timeout[TO_SK_SCIENCE] > 0) {
+            player.Say(SAY_NETMSG, "Wait a moment before trying to dismantle stuff again.");
+            return;
+        }
+
         if(player.Stat[ST_CURRENT_AP] < 3)
             return;
         player.StatBase[ST_CURRENT_AP] -= 300;
+
+        _SetTimeout(player, TO_SK_SCIENCE, REAL_MS(500));
 
         player.Wait(__Breaktime);
         _CritAnimateUse(player);
